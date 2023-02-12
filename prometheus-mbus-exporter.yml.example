@@ -2,6 +2,11 @@ mbus:
   device: /dev/ttymeterBus
   baud_rate: 2400
   meter_id: 0
+  record_ids: [ 0, 1, 4, 6, 7, 8, 9, 11 ]
+  # temperature records are automatically set to gauge
+  gauges:
+    - Power
+    - Volume flow
 exporter:
   location: YourLocation
   port: 9118

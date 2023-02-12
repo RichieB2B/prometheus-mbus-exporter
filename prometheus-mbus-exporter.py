@@ -11,7 +11,7 @@ import untangle
 import yaml
 
 from prometheus_client import start_http_server, Counter, Metric, REGISTRY
-from prometheus_client.core import CounterMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 class ExporterProcess(multiprocessing.Process):
 
@@ -50,50 +50,73 @@ class ExporterProcess(multiprocessing.Process):
 
     def parseMeterDataRecord(self, r):
         """
-        <DataRecord id="8">
-            <Function>Minimum value</Function>
+        <DataRecord id="0">
+            <Function>Instantaneous value</Function>
             <StorageNumber>0</StorageNumber>
-            <Tariff>2</Tariff> -- not always present
-            <Device>0</Device>
-            <Unit>Energy (10 Wh)</Unit>
-            <Value>0</Value>
-            <Timestamp>2019-10-18T13:32:54Z</Timestamp>
+            <Unit>Energy (kWh)</Unit>
+            <Value>1022</Value>
+            <Timestamp>2023-02-12T08:45:37Z</Timestamp>
         </DataRecord>
         """
         return {
             'Function': r.Function.cdata,
             'StorageNumber': r.StorageNumber.cdata,
-            'Tariff': r.Tariff.cdata if hasattr(r, 'Tariff') else None,
-            'Device': r.Device.cdata if hasattr(r, 'Device') else None,
             'Unit': r.Unit.cdata,
             'Value': r.Value.cdata,
+            'Timestamp': r.Timestamp.cdata,
         }
 
 
     def collect(self):
-        c = CounterMetricFamily('power_consumption', 'Power consumption', labels=['tariff', 'location'])
         xml = self.get_xml_for_device()
         try:
             obj = untangle.parse(xml.decode('utf-8'))
         except:
-            yield c
+            yield CounterMetricFamily('kamstrup_energy_kwh', 'Energy in kWh', labels=['location'])
             return
         meterdata = []
 
         for data in obj.MBusData.DataRecord:
-            meterdata.append(self.parseMeterDataRecord(data))
+            if int(data['id']) in config['mbus']['record_ids']:
+                meterdata.append(self.parseMeterDataRecord(data))
 
         for data in meterdata:
             if data['Function'] != 'Instantaneous value':
                 continue
-            if not data['Tariff']:
-                continue
-            if not data['Unit'] == 'Energy (10 Wh)':
-                continue
-            value = int(data['Value']) * 10
-            tariff = str(data['Tariff'])
-            c.add_metric([tariff, self.location], value)
-        yield c
+
+            # Normalize values
+            unit = data['Unit'].replace('m m^3/h','l/h')
+            if '(m ' in unit:
+                value = float(data['Value']) / 1000
+            elif '(1e-2 ' in unit:
+                value = float(data['Value']) / 100
+            elif '(1e-1 ' in unit:
+                value = float(data['Value']) / 10
+            elif '(10 ' in unit:
+                value = int(data['Value']) * 10
+            elif '(100 ' in unit:
+                value = int(data['Value']) * 100
+            else:
+                value = int(data['Value'])
+
+            # Extract actual unit: Volume (1e-2  m^3) -> m^3
+            u_help = unit.split('(')[-1].split(' ')[-1].split(')')[0]
+            u = u_help.lower().replace('^','').replace('/','_')
+            t_help = data['Unit'].split(' (')[0]
+            t = t_help.lower().replace(' ','_')
+            if 'temperature' in t:
+                t = t.replace('temperature','').strip('_')
+                c = GaugeMetricFamily('kamstrup_temperature_celcius', 'Temperature in Celsius', labels=['type', 'location'])
+                c.add_metric([t, self.location], value)
+            elif any(gauge.lower() in unit.lower() for gauge in config['mbus']['gauges']):
+                c = GaugeMetricFamily(f'kamstrump_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
+                c.add_metric([self.location], value)
+            else:
+                c = CounterMetricFamily(f'kamstrump_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
+                c.add_metric([self.location], value)
+
+            logging.debug(f"Added {t_help} in {u_help} value {value}")
+            yield c
 
 
 class CollectorProcess(multiprocessing.Process):
@@ -113,7 +136,7 @@ class CollectorProcess(multiprocessing.Process):
         while not self.exit.is_set():
             self.retrieve_xml_for_device()
             try:
-                time.sleep(15)
+                time.sleep(5)
             except KeyboardInterrupt:
                 return
 
@@ -145,6 +168,8 @@ def read_yaml(config_file):
     return cfg
 
 def main():
+    global config
+
     parser = argparse.ArgumentParser(
         description='M-Bus power meter Prometheus exporter.')
 
