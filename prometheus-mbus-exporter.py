@@ -109,10 +109,10 @@ class ExporterProcess(multiprocessing.Process):
                 c = GaugeMetricFamily('kamstrup_temperature_celcius', 'Temperature in Celsius', labels=['type', 'location'])
                 c.add_metric([t, self.location], value)
             elif any(gauge.lower() in unit.lower() for gauge in config['mbus']['gauges']):
-                c = GaugeMetricFamily(f'kamstrump_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
+                c = GaugeMetricFamily(f'kamstrup_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
                 c.add_metric([self.location], value)
             else:
-                c = CounterMetricFamily(f'kamstrump_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
+                c = CounterMetricFamily(f'kamstrup_{t}_{u}', f'{t_help} in {u_help}', labels=['location'])
                 c.add_metric([self.location], value)
 
             logging.debug(f"Added {t_help} in {u_help} value {value}")
@@ -136,7 +136,7 @@ class CollectorProcess(multiprocessing.Process):
         while not self.exit.is_set():
             self.retrieve_xml_for_device()
             try:
-                time.sleep(5)
+                time.sleep(30)
             except KeyboardInterrupt:
                 return
 
