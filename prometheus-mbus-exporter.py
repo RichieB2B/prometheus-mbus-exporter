@@ -134,9 +134,13 @@ class CollectorProcess(multiprocessing.Process):
     def run(self):
         logging.info('CollectorProcess: run')
         while not self.exit.is_set():
-            self.retrieve_xml_for_device()
+            returncode = self.retrieve_xml_for_device()
             try:
-                time.sleep(30)
+                if returncode:
+                    # error occurred
+                    time.sleep(10)
+                else:
+                    time.sleep(30)
             except KeyboardInterrupt:
                 return
 
@@ -146,14 +150,16 @@ class CollectorProcess(multiprocessing.Process):
 
     def retrieve_xml_for_device(self):
         try:
-            self.xml = subprocess.Popen('mbus-serial-request-data -b {:d} {:s} {:d}'.
+            child = subprocess.Popen('mbus-serial-request-data -b {:d} {:s} {:d}'.
                 format(self.baud_rate, self.device, self.meter_id),
                 shell=True,
-                stdout=subprocess.PIPE).stdout.read()
+                stdout=subprocess.PIPE)
+            self.xml = child.communicate()[0]
             logging.debug(self.xml)
             self.queue.put(self.xml)
+            return child.returncode
         except Exception:
-            pass
+            return -1
 
 def read_yaml(config_file):
     config_name = os.path.join(
