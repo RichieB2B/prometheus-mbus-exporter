@@ -15,12 +15,13 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 class ExporterProcess(multiprocessing.Process):
 
-    def __init__(self, queue, location=None, port=None, address='::'):
+    def __init__(self, xmlqueue, dataqueue, location=None, port=None, address='::'):
         multiprocessing.Process.__init__(self)
         self.exit = multiprocessing.Event()
         self.location = location
         self.xml = ''
-        self.queue = queue
+        self.xmlqueue = xmlqueue
+        self.dataqueue = dataqueue
         self.port = port
         self.address = address
         logging.info('ExporterProcess: init complete')
@@ -43,8 +44,8 @@ class ExporterProcess(multiprocessing.Process):
     def get_xml_for_device(self):
         # always retrieve the latest queue item
         logging.debug('get_xml_for_device called')
-        while not self.queue.empty():
-            self.xml = self.queue.get()
+        while not self.xmlqueue.empty():
+            self.xml = self.xmlqueue.get()
             logging.debug('Popped queue item: "%s"', self.xml)
         return self.xml
 
@@ -104,6 +105,13 @@ class ExporterProcess(multiprocessing.Process):
             u = u_help.lower().replace('^','').replace('/','_')
             t_help = data['Unit'].split(' (')[0]
             t = t_help.lower().replace(' ','_')
+
+            # Put power and volume flow values in data queue
+            if t.startswith('power') or t.startswith('volume_flow'):
+                self.dataqueue.put(value)
+                logging.debug(f'Put data: {value}')
+
+            # Add Prometheus metrics
             if 'temperature' in t:
                 t = t.replace('temperature','').strip('_')
                 c = GaugeMetricFamily('kamstrup_temperature_celcius', 'Temperature in Celsius', labels=['type', 'location'])
@@ -121,26 +129,45 @@ class ExporterProcess(multiprocessing.Process):
 
 class CollectorProcess(multiprocessing.Process):
 
-    def __init__(self, queue, device=None, meter_id=None, baud_rate=None):
+    def __init__(self, xmlqueue, dataqueue, device=None, meter_id=None, baud_rate=None):
         multiprocessing.Process.__init__(self)
         self.exit = multiprocessing.Event()
         self.baud_rate = baud_rate
         self.device = device
         self.meter_id = meter_id
         self.xml = ''
-        self.queue = queue
+        self.xmlqueue = xmlqueue
+        self.dataqueue = dataqueue
+        self.last_data = time.time()
         logging.info('CollectorProcess: init complete')
 
     def run(self):
         logging.info('CollectorProcess: run')
         while not self.exit.is_set():
             returncode = self.retrieve_xml_for_device()
+            while not self.dataqueue.empty():
+                value = self.dataqueue.get()
+                logging.debug(f'Got data: {value} of type {type(value)}')
+                if isinstance(value, int) and value > 0:
+                    self.last_data = time.time()
+            last = time.time() - self.last_data
             try:
                 if returncode:
                     # error occurred
                     time.sleep(10)
+                # sleep depends on how long ago the heating was on
+                elif last < 60:
+                    time.sleep(10)
+                elif last < 300:
+                    time.sleep(60)
+                elif last < 600:
+                    time.sleep(120)
+                elif last < 3600:
+                    time.sleep(300)
+                elif last < 86400:
+                    time.sleep(900)
                 else:
-                    time.sleep(30)
+                    time.sleep(3600)
             except KeyboardInterrupt:
                 return
 
@@ -156,7 +183,7 @@ class CollectorProcess(multiprocessing.Process):
                 stdout=subprocess.PIPE)
             self.xml = child.communicate()[0]
             logging.debug(self.xml)
-            self.queue.put(self.xml)
+            self.xmlqueue.put(self.xml)
             return child.returncode
         except Exception:
             return -1
@@ -196,14 +223,17 @@ def main():
         logging.error('Unable to load configuration, exitting.')
         return
 
-    queue = multiprocessing.Queue()
+    xmlqueue = multiprocessing.Queue()
+    dataqueue = multiprocessing.Queue()
     collector_process = CollectorProcess(
-        queue,
+        xmlqueue,
+        dataqueue,
         device=config['mbus']['device'],
         meter_id=config['mbus']['meter_id'],
         baud_rate=config['mbus']['baud_rate'])
     exporter_process = ExporterProcess(
-        queue,
+        xmlqueue,
+        dataqueue,
         location=config['exporter']['location'],
         port=config['exporter']['port'],
         address=config['exporter']['address'])
