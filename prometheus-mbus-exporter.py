@@ -145,6 +145,7 @@ class CollectorProcess(multiprocessing.Process):
         logging.info('CollectorProcess: run')
         while not self.exit.is_set():
             returncode = self.retrieve_xml_for_device()
+            time.sleep(10)
             while not self.dataqueue.empty():
                 value = self.dataqueue.get()
                 logging.debug(f'Got data: {value} of type {type(value)}')
@@ -152,12 +153,9 @@ class CollectorProcess(multiprocessing.Process):
                     self.last_data = time.time()
             last = time.time() - self.last_data
             try:
-                if returncode:
-                    # error occurred
-                    time.sleep(10)
                 # sleep depends on how long ago the heating was on
-                elif last < 60:
-                    time.sleep(10)
+                if returncode or last < 60:
+                    time.sleep(0)
                 elif last < 300:
                     time.sleep(60)
                 elif last < 600:
